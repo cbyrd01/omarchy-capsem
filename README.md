@@ -105,8 +105,10 @@ The package adds you to the `kvm` group for access to `/dev/kvm`. That takes
 effect at your next login; until then the installer grants access to the
 current session directly.
 
-Update Capsem by pulling this repository and running `makepkg -si` again.
-`capsem update` will tell you the same.
+Update the programs by pulling this repository and running `makepkg -si`
+again. Capsem's own updater recognises a distribution package and leaves the
+programs to it, while still keeping the guest VM images current
+automatically (or on demand with `capsem update --assets`).
 
 ## Development
 

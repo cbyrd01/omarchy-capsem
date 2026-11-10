@@ -3,6 +3,28 @@
 # and register/start the systemd user service on Arch Linux / Omarchy.
 set -euo pipefail
 
+usage() {
+  cat <<'USAGE'
+Usage: capsem-setup
+
+Sets Capsem up for your user after the package is installed or upgraded:
+links the programs into ~/.capsem/bin, downloads and verifies the guest VM
+images, and registers and starts the capsem systemd user service. Safe to
+run again.
+
+Updates afterwards:
+  the programs       rebuild the package (makepkg -si in packaging/)
+  guest VM images    automatic (Settings > App > Automatic updates),
+                     or run: capsem update --assets
+USAGE
+}
+
+case "${1:-}" in
+  "") ;;
+  -h|--help) usage; exit 0 ;;
+  *) echo "capsem-setup: unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+
 if (( EUID == 0 )); then
   echo "Run capsem-setup as your normal desktop user, not root." >&2
   exit 1
