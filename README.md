@@ -95,7 +95,7 @@ The first build takes around fifteen minutes.
 cd packaging
 # Build outside this folder: a build tree in here would make
 # `omarchy plugin update` reject the plugin.
-export BUILDDIR=~/.cache/capsem-build SRCDEST=~/.cache/capsem-build
+export BUILDDIR=~/.cache/capsem-build SRCDEST=~/.cache/capsem-build/sources
 makepkg -si      # builds and installs the capsem package
 capsem-setup     # as your user: downloads the VM images, starts the service
 capsem doctor    # checks KVM access and boots a test VM
