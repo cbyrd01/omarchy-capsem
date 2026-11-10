@@ -4,7 +4,7 @@
   "trigger.capsem": {"icon":"󰒃","label":"Capsem Sandbox","aliases":["capsem","sandbox"]},
   "trigger.capsem.app": {"icon":"󰀻","label":"Open Capsem App","action":"omarchy-launch-or-focus capsem-app 'uwsm-app -- capsem-app'"},
   "trigger.capsem.tui": {"icon":"","label":"Control TUI","action":"omarchy-launch-or-focus-tui capsem-tui"},
-  "trigger.capsem.shell": {"icon":"󰆍","label":"New Ephemeral VM Shell","action":"uwsm-app -- xdg-terminal-exec --app-id=org.omarchy.capsem-tui -e capsem run"},
+  "trigger.capsem.shell": {"icon":"󰆍","label":"New Ephemeral VM Shell","action":"~/.config/omarchy/plugins/io.github.cbyrd01.capsem/bin/capsem-omarchy action new-shell"},
   "trigger.capsem.panel": {"icon":"󰒘","label":"Toggle Bar Panel","action":"omarchy-shell io.github.cbyrd01.capsem toggle"},
   "trigger.capsem.doctor": {"icon":"󰓙","label":"Run VM Diagnostics","action":"omarchy-launch-floating-terminal-with-presentation 'capsem doctor'"},
   "trigger.capsem.restart": {"icon":"","label":"Restart Capsem Service","action":"systemctl --user restart capsem.service && notify-send -a 'Capsem' 'Capsem Service' 'Restarted capsem.service'"}

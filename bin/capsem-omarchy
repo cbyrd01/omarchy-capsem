@@ -359,6 +359,17 @@ def notify(status: dict[str, Any]) -> None:
         pass
 
 
+# A throwaway sandbox with a terminal on it. `capsem run` only runs a command
+# without a terminal, so this creates a session, opens the terminal UI on it
+# and deletes it when that closes, including when the window is closed.
+NEW_SHELL_SCRIPT = """
+id=$(capsem create) || { echo; echo "Could not create a sandbox. Press Enter to close."; read -r _; exit 1; }
+trap 'capsem delete "$id" >/dev/null 2>&1' EXIT
+trap 'exit 129' HUP TERM INT
+capsem shell "$id"
+"""
+
+
 def spawn_detached(cmd: list[str]) -> None:
     subprocess.Popen(
         cmd,
@@ -417,8 +428,9 @@ def run_action(args: list[str]) -> int:
                 "xdg-terminal-exec",
                 "--app-id=org.omarchy.capsem-tui",
                 "-e",
-                "capsem",
-                "run",
+                "bash",
+                "-c",
+                NEW_SHELL_SCRIPT,
             ]
         )
         return 0

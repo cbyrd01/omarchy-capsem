@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 
 HELPER = Path(os.environ.get("CAPSEM_OMARCHY_TEST_HELPER", Path(__file__).resolve().parents[1] / "bin/capsem-omarchy"))
@@ -171,6 +172,25 @@ class HelperTest(unittest.TestCase):
             self.assertEqual(self.run_helper("action", "vm-delete", bad).returncode, 1, bad)
             self.assertEqual(self.run_helper("action", "ask-approve", VM, bad, "g").returncode, 1, bad)
             self.assertEqual(self.world["requests"], [], bad)
+
+    def test_new_shell_opens_a_terminal_on_a_fresh_session_and_deletes_it_after(self):
+        stub = Path(self.tmp.name) / "bin" / "capsem"
+        stub.write_text(BUSCTL + 'if sys.argv[1:] == ["create"]:\n    print("vm-new")\n')
+        stub.chmod(0o755)
+        self.assertEqual(self.run_helper("action", "new-shell").returncode, 0)
+        launch = None
+        for _ in range(100):
+            calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+            launch = next((c for c in calls if "-e" in c), None)
+            if launch:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(launch, "no terminal was started")
+        command = launch[launch.index("-e") + 1 :]
+        self.calls.write_text("")
+        subprocess.run(command, env=self.env, timeout=20, check=True)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(calls, [["create"], ["shell", "vm-new"], ["delete", "vm-new"]])
 
 
 if __name__ == "__main__":
