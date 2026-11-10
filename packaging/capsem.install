@@ -1,0 +1,61 @@
+_configure_vm_device_access() {
+  local target_user="${SUDO_USER:-}"
+  if [[ -z "$target_user" || "$target_user" == "root" ]]; then
+    return 0
+  fi
+  local target_uid
+  target_uid="$(id -u "$target_user" 2>/dev/null || true)"
+  if [[ -z "$target_uid" ]]; then
+    return 0
+  fi
+
+  local rule_source="/usr/lib/udev/rules.d/99-capsem-vm-devices.rules"
+  local rule_target="/run/udev/rules.d/99-capsem-vm-devices.rules"
+  if [[ -f "$rule_source" ]]; then
+    install -dm755 /run/udev/rules.d
+    {
+      cat "$rule_source"
+      printf 'KERNEL=="kvm", RUN:="/usr/bin/setfacl -m u:%s:rw /dev/%%k"\n' "$target_uid"
+      printf 'KERNEL=="vhost-vsock", RUN:="/usr/bin/setfacl -m u:%s:rw /dev/%%k"\n' "$target_uid"
+    } > "$rule_target"
+    chmod 0644 "$rule_target"
+  fi
+
+  if getent group kvm >/dev/null 2>&1; then
+    usermod --append --groups kvm "$target_user" 2>/dev/null || true
+  fi
+}
+
+post_install() {
+  if command -v modprobe >/dev/null 2>&1; then
+    modprobe kvm 2>/dev/null || true
+    modprobe vhost_vsock 2>/dev/null || true
+  fi
+  _configure_vm_device_access
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger --name-match=kvm 2>/dev/null || true
+    udevadm trigger --name-match=vhost-vsock 2>/dev/null || true
+    udevadm settle --timeout=10 2>/dev/null || true
+  fi
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    for dev in /dev/kvm /dev/vhost-vsock; do
+      if [[ -c "$dev" ]]; then
+        setfacl -m "u:${SUDO_USER}:rw" "$dev" 2>/dev/null || true
+      fi
+    done
+  fi
+  echo "==> Run 'capsem-setup' as your desktop user to download guest VM assets and start capsem.service."
+}
+
+post_upgrade() {
+  post_install
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    local uid
+    uid="$(id -u "$SUDO_USER" 2>/dev/null || true)"
+    if [[ -n "$uid" && -d "/run/user/$uid" ]]; then
+      runuser -u "$SUDO_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user daemon-reload 2>/dev/null || true
+      runuser -u "$SUDO_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user try-restart capsem.service 2>/dev/null || true
+    fi
+  fi
+}

@@ -82,10 +82,28 @@ use Inspect and decide in the Capsem app.
 
 ## Installing Capsem on Omarchy
 
-Capsem supports Ubuntu and Debian. Running it on Arch currently needs a few
-small fixes that have not been released upstream. Until they are, the
-[`packaging/`](packaging/) directory has what is needed to build it. *(Not yet
-written.)*
+Capsem supports Ubuntu and Debian and publishes no Arch package. Running it
+on Arch currently needs a few small fixes that are not yet released upstream,
+so [`packaging/`](packaging/) builds it from source: upstream main plus those
+fixes, from the `omarchy` branch of
+[cbyrd01/capsem](https://github.com/cbyrd01/capsem).
+
+You need `rustup`, `mise` and `node` on your PATH; Omarchy has the last two.
+The first build takes around fifteen minutes.
+
+```bash
+cd packaging
+makepkg -si      # builds and installs the capsem package
+capsem-setup     # as your user: downloads the VM images, starts the service
+capsem doctor    # checks KVM access and boots a test VM
+```
+
+The package adds you to the `kvm` group for access to `/dev/kvm`. That takes
+effect at your next login; until then the installer grants access to the
+current session directly.
+
+Update Capsem by pulling this repository and running `makepkg -si` again.
+`capsem update` will tell you the same.
 
 ## Development
 

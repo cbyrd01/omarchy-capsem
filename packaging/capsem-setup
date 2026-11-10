@@ -1,0 +1,74 @@
+#!/bin/bash
+# capsem-setup -- Initialize per-user ~/.capsem layout, hydrate VM assets,
+# and register/start the systemd user service on Arch Linux / Omarchy.
+set -euo pipefail
+
+if (( EUID == 0 )); then
+  echo "Run capsem-setup as your normal desktop user, not root." >&2
+  exit 1
+fi
+
+CAPSEM_DIR="$HOME/.capsem"
+MANIFEST_METADATA="/usr/share/capsem/assets/manifest-metadata.json"
+
+echo "==> Preparing $CAPSEM_DIR layout..."
+umask 077
+mkdir -p "$CAPSEM_DIR/bin" "$CAPSEM_DIR/assets" "$CAPSEM_DIR/run" "$CAPSEM_DIR/logs"
+
+for bin in \
+  capsem \
+  capsem-service \
+  capsem-process \
+  capsem-ledger \
+  capsem-proxy \
+  capsem-tui \
+  capsem-router \
+  capsem-mcp-aggregator \
+  capsem-mcp-builtin \
+  capsem-gateway \
+  capsem-tray \
+  capsem-admin \
+  capsem-mock-server \
+  capsem-bench-rs; do
+  if [[ ! -x "/usr/bin/$bin" ]]; then
+    echo "Error: missing /usr/bin/$bin" >&2
+    exit 1
+  fi
+  ln -sfn "/usr/bin/$bin" "$CAPSEM_DIR/bin/$bin"
+done
+
+if [[ -f "$MANIFEST_METADATA" ]]; then
+  install -m 0644 "$MANIFEST_METADATA" "$CAPSEM_DIR/assets/manifest-metadata.json"
+fi
+
+MANIFEST_URL="https://release.capsem.org/assets/stable/manifest.json"
+echo "==> Fetching and verifying Capsem guest VM assets ($MANIFEST_URL)..."
+CAPSEM_HOME="$CAPSEM_DIR" CAPSEM_RUN_DIR="$CAPSEM_DIR/run" \
+  "$CAPSEM_DIR/bin/capsem" update --assets --manifest "$MANIFEST_URL"
+
+echo "==> Refreshing release channel status..."
+CAPSEM_HOME="$CAPSEM_DIR" CAPSEM_RUN_DIR="$CAPSEM_DIR/run" \
+  "$CAPSEM_DIR/bin/capsem" update --check || true
+
+echo "==> Registering and starting capsem.service (systemd user service)..."
+unset CAPSEM_HOME CAPSEM_RUN_DIR CAPSEM_ASSETS_DIR
+"$CAPSEM_DIR/bin/capsem" install
+
+echo "==> Waiting for Capsem service and gateway readiness..."
+for _ in $(seq 1 20); do
+  if status_out=$("$CAPSEM_DIR/bin/capsem" status 2>/dev/null || true); then
+    if grep -q "Service:   ok" <<<"$status_out" && grep -q "Gateway:   ok" <<<"$status_out"; then
+      echo "$status_out"
+      echo ""
+      echo "Capsem is installed and running!"
+      echo "  CLI:       capsem"
+      echo "  TUI:       capsem-tui"
+      echo "  Dashboard: capsem-app"
+      exit 0
+    fi
+  fi
+  sleep 1
+done
+
+echo "Warning: capsem.service did not report ready within 20s. Check: systemctl --user status capsem.service" >&2
+exit 1

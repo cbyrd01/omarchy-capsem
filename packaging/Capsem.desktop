@@ -1,0 +1,10 @@
+[Desktop Entry]
+Categories=Development;Security;System;
+Comment=Hardware-isolated AI agent sandbox and network inspector
+Exec=capsem-app %u
+Icon=capsem
+Name=Capsem
+Terminal=false
+Type=Application
+StartupWMClass=capsem-app
+Keywords=ai;sandbox;vm;security;agent;kvm;

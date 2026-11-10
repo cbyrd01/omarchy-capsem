@@ -1,0 +1,148 @@
+# Maintainer: Christopher Byrd <cbyrd01 at users dot noreply dot github dot com>
+#
+# Builds Capsem for Arch Linux / Omarchy from source.
+#
+# Capsem's releases are a .deb and a .pkg. Until the fixes it needs on Arch
+# are released upstream, this builds the `omarchy` branch of a fork: upstream
+# main plus those fixes, each of them a separate branch there.
+#
+#   makepkg -si
+#
+# To build from a local checkout instead of GitHub:
+#
+#   CAPSEM_GIT=file://$HOME/code/capsem makepkg -si
+
+pkgname=capsem
+pkgver=0.7.2
+pkgrel=7
+_commit=2715919d2ee7ccde1834169ecf607ef8f24f38a2
+pkgdesc="Hardware-isolated micro-VM sandbox for AI coding agents"
+arch=('x86_64' 'aarch64')
+url="https://github.com/google/capsem"
+license=('Apache-2.0')
+depends=(
+  'acl'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
+  'gtk3'
+  'hicolor-icon-theme'
+  'kmod'
+  'libayatana-appindicator'
+  'libsoup3'
+  'openssl'
+  'pango'
+  'sqlite'
+  'systemd-libs'
+  'webkit2gtk-4.1'
+  'xdotool'
+  'zstd'
+)
+# The build also needs rustup, mise and node on PATH. They are checked in
+# prepare() rather than listed here because Omarchy installs them outside
+# pacman (rustup.rs, mise-bin, node through mise), and makepkg would refuse
+# to start over packages that are present but not registered.
+makedepends=('git')
+conflicts=('capsem-bin')
+options=('!lto' '!debug' '!strip')
+install=capsem.install
+source=(
+  "capsem::git+${CAPSEM_GIT:-https://github.com/cbyrd01/capsem.git}#commit=${_commit}"
+  "Capsem.desktop"
+  "capsem-setup"
+)
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP')
+
+_bins=(
+  capsem
+  capsem-app
+  capsem-service
+  capsem-process
+  capsem-ledger
+  capsem-proxy
+  capsem-tui
+  capsem-router
+  capsem-mcp-aggregator
+  capsem-mcp-builtin
+  capsem-gateway
+  capsem-tray
+  capsem-admin
+  capsem-mock-server
+  capsem-bench-rs
+)
+
+prepare() {
+  local tool missing=()
+  for tool in rustup cargo mise node; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+  done
+  if (( ${#missing[@]} )); then
+    echo "Missing build tools: ${missing[*]}" >&2
+    echo "rustup: pacman -S rustup    mise: omarchy ships it    node: mise use -g node" >&2
+    return 1
+  fi
+}
+
+build() {
+  cd "$srcdir/capsem"
+
+  # The repo pins pnpm (its package.json overrides are ignored by pnpm 11+).
+  local pnpm_version
+  pnpm_version="$(sed -n 's/^pnpm_version = "\(.*\)"$/\1/p' config/gate.toml)"
+  [[ -n "$pnpm_version" ]] || { echo "pnpm pin not found in config/gate.toml" >&2; return 1; }
+  local pnpm=(mise exec "pnpm@$pnpm_version" -- pnpm)
+
+  # capsem-app embeds web/app/dist at compile time, so the frontend is always
+  # built first.
+  CI=true "${pnpm[@]}" --dir sdk/typescript install --frozen-lockfile
+  CI=true "${pnpm[@]}" --dir web/app install --frozen-lockfile
+  CI=true "${pnpm[@]}" --dir sdk/typescript run build
+  CI=true "${pnpm[@]}" --dir web/app run build
+
+  # Let the repo choose its toolchain (rust-toolchain.toml) and its target
+  # directory (.cargo/config.toml), whatever makepkg.conf exports.
+  unset RUSTUP_TOOLCHAIN CARGO_TARGET_DIR
+  export CAPSEM_BUILD_REVISION="${_commit:0:9}"
+
+  cargo build --release --locked \
+    -p capsem -p capsem-app -p capsem-service -p capsem-process \
+    -p capsem-ledger -p capsem-proxy -p capsem-tui -p capsem-router \
+    -p capsem-mcp-aggregator -p capsem-mcp-builtin -p capsem-gateway \
+    -p capsem-tray -p capsem-admin -p capsem-mock-server -p capsem-bench
+}
+
+package() {
+  cd "$srcdir/capsem"
+  local release_dir="cache/target/cargo/release"
+
+  local bin
+  for bin in "${_bins[@]}"; do
+    install -Dm755 "$release_dir/$bin" "$pkgdir/usr/bin/$bin"
+  done
+  install -Dm755 "$srcdir/capsem-setup" "$pkgdir/usr/bin/capsem-setup"
+
+  install -Dm644 "$srcdir/Capsem.desktop" "$pkgdir/usr/share/applications/Capsem.desktop"
+  install -Dm644 web/graphics/tauri/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/capsem.png"
+  install -Dm644 web/graphics/tauri/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/capsem.png"
+  install -Dm644 web/graphics/tauri/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/capsem.png"
+  install -Dm644 web/graphics/tauri/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/capsem.svg"
+
+  # Access to /dev/kvm and /dev/vhost-vsock for the kvm group, and the two
+  # modules loaded at boot.
+  install -Dm644 build_system/packaging/linux/99-capsem-vm-devices.rules \
+    "$pkgdir/usr/lib/udev/rules.d/99-capsem-vm-devices.rules"
+  install -dm755 "$pkgdir/usr/lib/modules-load.d"
+  printf 'kvm\nvhost_vsock\n' > "$pkgdir/usr/lib/modules-load.d/capsem.conf"
+
+  # Where this install gets its guest VM images from.
+  local now
+  now="$(date -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}" '+%Y-%m-%dT%H:%M:%SZ')"
+  install -dm755 "$pkgdir/usr/share/capsem/assets"
+  cat > "$pkgdir/usr/share/capsem/assets/manifest-metadata.json" <<JSON
+{"channel": "stable", "channel_kind": "public", "channel_locked": false, "fetched_at": "$now", "manifest_url": "https://release.capsem.org/assets/stable/manifest.json", "origin": "package", "package_version": "$pkgver", "packaged_at": "$now", "schema": "capsem.manifest_metadata.v1"}
+JSON
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

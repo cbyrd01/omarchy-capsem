@@ -1,0 +1,5 @@
+pkg/
+src/
+capsem/
+*.pkg.tar.zst
+*.log
