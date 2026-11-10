@@ -1,0 +1,493 @@
+#!/usr/bin/env python3
+"""Capsem helper for the Omarchy shell plugin (bar panel + notification service)."""
+
+from __future__ import annotations
+
+import html
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from typing import Any
+
+
+def capsem_run_dir() -> pathlib.Path:
+    env_dir = os.environ.get("CAPSEM_RUN_DIR")
+    if env_dir:
+        return pathlib.Path(env_dir)
+    home = os.environ.get("CAPSEM_HOME")
+    if home:
+        return pathlib.Path(home) / "run"
+    return pathlib.Path.home() / ".capsem" / "run"
+
+
+def state_dir() -> pathlib.Path:
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = pathlib.Path(xdg) if xdg else (pathlib.Path.home() / ".local" / "state")
+    d = base / "omarchy" / "capsem"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def discover_gateway() -> tuple[str, str] | None:
+    run_dir = capsem_run_dir()
+    port_file = run_dir / "gateway.port"
+    token_file = run_dir / "gateway.token"
+    try:
+        port = int(port_file.read_text(encoding="utf-8").strip())
+        token = token_file.read_text(encoding="utf-8").strip()
+        if not token:
+            return None
+        return f"http://127.0.0.1:{port}", token
+    except Exception:
+        return None
+
+
+def gw_request(
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    timeout: float = 1.5,
+) -> Any:
+    discovered = discover_gateway()
+    if not discovered:
+        raise RuntimeError("gateway not running")
+    base_url, token = discovered
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Authorization": f"Bearer {token}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        f"{base_url}{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        if not raw:
+            return {}
+        return json.loads(raw.decode("utf-8"))
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def plain_text(value: Any, limit: int = 200) -> str:
+    """Flatten sandbox-controlled text to one bounded line.
+
+    VM names, rule names and request summaries are chosen by whatever runs
+    inside the sandbox, so they are never trusted as display text.
+    """
+    text = _CONTROL_CHARS.sub(" ", str(value)).strip()
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return text
+
+
+def notification_body(value: Any, limit: int = 300) -> str:
+    """Escape sandbox-controlled text for a notification body.
+
+    Notification bodies are markup, and the daemon turns bare URLs into
+    clickable links. Escape the markup and break URL schemes so a sandboxed
+    process cannot put a rich-text element or a live link on the host desktop.
+    """
+    return html.escape(plain_text(value, limit).replace("://", ":\u200b//"), quote=False)
+
+
+def build_status() -> dict[str, Any]:
+    try:
+        st = gw_request("GET", "/status")
+    except Exception as exc:
+        return {
+            "ready": False,
+            "service": "stopped",
+            "reason": str(exc),
+            "version": "",
+            "runningCount": 0,
+            "stoppedCount": 0,
+            "suspendedCount": 0,
+            "pendingAsksCount": 0,
+            "deniedRequests": 0,
+            "allowedRequests": 0,
+            "pendingAsks": [],
+            "vms": [],
+        }
+
+    service_state = str(st.get("service", "stopped")).lower()
+    ready = service_state == "running"
+    version = str(st.get("gateway_version") or "")
+    raw_vms = st.get("vms") or []
+
+    running_count = 0
+    stopped_count = 0
+    suspended_count = 0
+    total_denied = 0
+    total_allowed = 0
+    pending_asks: list[dict[str, Any]] = []
+    vms_out: list[dict[str, Any]] = []
+
+    for vm in raw_vms:
+        vm_id = str(vm.get("id") or "")
+        vm_name = vm.get("name")
+        vm_label = plain_text(vm_name, 40) if vm_name else vm_id[:8]
+        vm_status = str(vm.get("status") or "unknown").lower()
+        persistent = bool(vm.get("persistent"))
+        actions = [str(a).lower() for a in (vm.get("available_actions") or [])]
+
+        if vm_status == "running":
+            running_count += 1
+        elif vm_status == "suspended":
+            suspended_count += 1
+        else:
+            stopped_count += 1
+
+        # /status already carries the per-VM counters, so a tick costs one
+        # request. The approval details are fetched only while a VM reports
+        # that something is actually waiting.
+        vm_denied = int(vm.get("denied_requests") or 0)
+        vm_allowed = int(vm.get("allowed_requests") or 0)
+        total_denied += vm_denied
+        total_allowed += vm_allowed
+
+        if vm_status == "running" and vm_id and int(vm.get("pending_approval_count") or 0) > 0:
+            try:
+                asks = gw_request("GET", f"/vms/{vm_id}/security/asks", timeout=0.8)
+                gen = str((asks or {}).get("generation") or "")
+                for req in (asks or {}).get("requests") or []:
+                    if str(req.get("status") or "").lower() == "pending":
+                        pending_asks.append(
+                            {
+                                "vmId": vm_id,
+                                "vmLabel": vm_label,
+                                "generation": gen,
+                                "askId": str(req.get("ask_id") or ""),
+                                "ruleName": plain_text(req.get("rule_name") or req.get("rule_id") or "Policy Ask", 80),
+                                "summary": plain_text(req.get("summary") or "Pending approval"),
+                            }
+                        )
+            except Exception:
+                pass
+
+        vms_out.append(
+            {
+                "id": vm_id,
+                "label": vm_label,
+                "status": vm_status,
+                "persistent": persistent,
+                "actions": actions,
+                "denied": vm_denied,
+                "allowed": vm_allowed,
+            }
+        )
+
+    return {
+        "ready": ready,
+        "service": service_state,
+        "version": version,
+        "runningCount": running_count,
+        "stoppedCount": stopped_count,
+        "suspendedCount": suspended_count,
+        "pendingAsksCount": len(pending_asks),
+        "deniedRequests": total_denied,
+        "allowedRequests": total_allowed,
+        "pendingAsks": pending_asks,
+        "vms": vms_out,
+    }
+
+
+def latest_denied_summary(vm_id: str) -> str:
+    try:
+        tl = gw_request("GET", f"/vms/{vm_id}/timeline", timeout=0.8)
+        events = (tl or {}).get("events") or []
+        for ev in reversed(events):
+            if ev.get("layer") == "net" and ev.get("status") in (403, None):
+                summary = str(ev.get("summary") or "").strip()
+                if summary:
+                    return summary
+    except Exception:
+        pass
+    return ""
+
+
+def send_notification(
+    title: str,
+    body: str,
+    urgency: str = "normal",
+    click_argv: list[str] | None = None,
+    actions: list[dict[str, Any]] | None = None,
+) -> None:
+    urgency_byte = {"low": "0", "normal": "1", "critical": "2"}.get(urgency, "1")
+    hints: list[str] = [
+        "urgency",
+        "y",
+        urgency_byte,
+        "omarchy-glyph",
+        "s",
+        "󰒃",
+    ]
+    if click_argv:
+        hints.extend(["omarchy-exec-argv", "s", json.dumps(click_argv)])
+    if actions:
+        hints.extend(["omarchy-actions", "s", json.dumps(actions[:3])])
+
+    hint_count = str(len(hints) // 3)
+    cmd = [
+        "busctl",
+        "--user",
+        "--",
+        "call",
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "Notify",
+        "susssasa{sv}i",
+        "omarchy-action",
+        "0",
+        "capsem",
+        title,
+        body,
+        "0",
+        hint_count,
+        *hints,
+        "-1",
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except Exception:
+        pass
+
+
+def notify(status: dict[str, Any]) -> None:
+    """Raise a notification for each approval or block that is new since the last poll."""
+    self_bin = str(pathlib.Path(__file__).resolve())
+    state_file = state_dir() / "notify-state.json"
+    prev: dict[str, Any] = {}
+    if state_file.exists():
+        try:
+            prev = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            prev = {}
+
+    seen_asks: list[str] = list(prev.get("seenAsks") or [])
+    vm_denied_map: dict[str, int] = dict(prev.get("vmDenied") or {})
+    initialized = bool(prev.get("initialized", False))
+
+    if not status.get("ready"):
+        return
+
+    current_asks: list[str] = []
+    for ask in status.get("pendingAsks") or []:
+        vm_id = ask["vmId"]
+        ask_id = ask["askId"]
+        gen = ask["generation"]
+        key = f"{vm_id}:{ask_id}"
+        current_asks.append(key)
+        if initialized and key not in seen_asks:
+            send_notification(
+                f"Approval Required ({plain_text(ask['vmLabel'], 40)})",
+                notification_body(f"{ask['ruleName']}: {ask['summary']}"),
+                urgency="critical",
+                click_argv=["omarchy-shell", "-q", "io.github.cbyrd01.capsem", "open"],
+                actions=[
+                    {
+                        "label": "Approve",
+                        "argv": [self_bin, "action", "ask-approve", vm_id, ask_id, gen],
+                    },
+                    {
+                        "label": "Deny",
+                        "argv": [self_bin, "action", "ask-deny", vm_id, ask_id, gen],
+                    },
+                    {
+                        "label": "Inspect VM",
+                        "argv": [self_bin, "action", "open-ui", vm_id],
+                    },
+                ],
+            )
+
+    new_denied_map: dict[str, int] = {}
+    for vm in status.get("vms") or []:
+        vm_id = vm["id"]
+        denied = int(vm.get("denied") or 0)
+        new_denied_map[vm_id] = denied
+        old_denied = int(vm_denied_map.get(vm_id, denied if not initialized else 0))
+        if initialized and denied > old_denied:
+            delta = denied - old_denied
+            plural = "s" if delta != 1 else ""
+            target_detail = latest_denied_summary(vm_id)
+            if target_detail:
+                body = f"Denied {notification_body(target_detail)} ({denied} blocked total)."
+            else:
+                body = f"Capsem L8 proxy denied {delta} outbound request{plural} ({denied} blocked total)."
+            send_notification(
+                f"Blocked Network Request{plural} ({plain_text(vm['label'], 40)})",
+                body,
+                urgency="normal",
+                click_argv=[self_bin, "action", "open-ui", vm_id],
+                actions=[
+                    {
+                        "label": "Inspect VM",
+                        "argv": [self_bin, "action", "open-ui", vm_id],
+                    },
+                    {
+                        "label": "Stop VM",
+                        "argv": [self_bin, "action", "vm-stop", vm_id],
+                    },
+                ],
+            )
+
+    next_state = {
+        "initialized": True,
+        "updatedAt": int(time.time()),
+        "seenAsks": current_asks[-100:],
+        "vmDenied": new_denied_map,
+    }
+    try:
+        state_file.write_text(json.dumps(next_state), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def spawn_detached(cmd: list[str]) -> None:
+    subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def refresh_bar_widget() -> None:
+    try:
+        subprocess.run(
+            ["omarchy-shell", "-q", "io.github.cbyrd01.capsem", "refresh"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except Exception:
+        pass
+
+
+_SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def run_action(args: list[str]) -> int:
+    if not args:
+        return 1
+    act = args[0]
+    # Identifiers end up in gateway URL paths and on a command line. Refuse
+    # anything that is not a plain identifier rather than trying to quote it.
+    if any(not _SAFE_ID.fullmatch(a) for a in args[1:3] if a):
+        return 1
+
+    if act == "open-ui":
+        if len(args) > 1 and args[1]:
+            spawn_detached([
+                "uwsm-app", "--", "capsem-app", "--connect", args[1],
+            ])
+        else:
+            spawn_detached([
+                "omarchy-launch-or-focus",
+                "capsem-app",
+                "uwsm-app -- capsem-app",
+            ])
+        return 0
+
+    if act == "open-tui":
+        spawn_detached(["omarchy-launch-or-focus-tui", "capsem-tui"])
+        return 0
+
+    if act == "new-shell":
+        spawn_detached(
+            [
+                "xdg-terminal-exec",
+                "--app-id=org.omarchy.capsem-tui",
+                "-e",
+                "capsem",
+                "run",
+            ]
+        )
+        return 0
+
+    if act == "doctor":
+        spawn_detached(
+            [
+                "omarchy-launch-floating-terminal-with-presentation",
+                "capsem doctor",
+            ]
+        )
+        return 0
+
+    if act == "start-service":
+        subprocess.run(["systemctl", "--user", "restart", "capsem.service"], check=False)
+        refresh_bar_widget()
+        return 0
+
+    if act == "vm-stop" and len(args) > 1:
+        gw_request("POST", f"/vms/{args[1]}/stop")
+        refresh_bar_widget()
+        return 0
+
+    if act == "vm-start" and len(args) > 1:
+        gw_request("POST", f"/vms/{args[1]}/start")
+        refresh_bar_widget()
+        return 0
+
+    if act == "vm-resume" and len(args) > 1:
+        gw_request("POST", f"/vms/{args[1]}/resume")
+        refresh_bar_widget()
+        return 0
+
+    if act == "vm-delete" and len(args) > 1:
+        gw_request("DELETE", f"/vms/{args[1]}/delete")
+        refresh_bar_widget()
+        return 0
+
+    if act in ("ask-approve", "ask-deny") and len(args) > 3:
+        vm_id, ask_id, generation = args[1], args[2], args[3]
+        decision = "approve" if act == "ask-approve" else "deny"
+        gw_request(
+            "POST",
+            f"/vms/{vm_id}/security/asks/{ask_id}/resolve",
+            body={"generation": generation, "decision": decision},
+        )
+        refresh_bar_widget()
+        return 0
+
+    return 1
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if not argv or argv[0] == "status":
+        print(json.dumps(build_status()))
+        return 0
+    if argv[0] == "poll":
+        # One process per tick: read the state once, notify on what is new,
+        # and hand the same state to the shell service.
+        status = build_status()
+        notify(status)
+        print(json.dumps(status))
+        return 0
+    if argv[0] == "action":
+        return run_action(argv[1:])
+    print(json.dumps({"error": f"unknown command: {argv[0]}"}))
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

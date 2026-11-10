@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.cbyrd01.capsem",
+  "name": "Capsem",
+  "version": "0.1.0",
+  "author": "cbyrd01",
+  "license": "MIT",
+  "homepage": "https://github.com/cbyrd01/omarchy-capsem",
+  "description": "See and control Capsem sandboxes from the Omarchy bar: running VMs, blocked requests, and Approve / Deny notifications for requests that need your decision.",
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Capsem",
+    "description": "Monitor and control Capsem sandboxes, answer approval requests, and open sandboxed shells from the bar.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
