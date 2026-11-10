@@ -14,8 +14,8 @@
 
 pkgname=capsem
 pkgver=0.7.2
-pkgrel=8
-_commit=b24d2341775b7a9796edf0e90c0bb6f2648d64af
+pkgrel=9
+_commit=fccca158fe90684e01ea06c19f5217a76453a061
 pkgdesc="Hardware-isolated micro-VM sandbox for AI coding agents"
 arch=('x86_64' 'aarch64')
 url="https://github.com/google/capsem"
